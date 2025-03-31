@@ -72,6 +72,7 @@ Create a Google Apps Script associated with a Google Sheet to automate the proce
 *   **Script Files:** Logic resides primarily in `UploadLogic.gs`. Menu creation is handled in the user's existing active script file (e.g., `Code.gs`, `index.gs`). The local `samplegs.gs` file is informational only and not part of the active project.
 *   **Menu Item:** The existing `onOpen` function in the active script file was modified to create a single "Live Music Locator" menu, incorporating the original items plus a new item: `Upload Gigs with Check` which calls the `uploadGigsWithCheck` function in `UploadLogic.gs`.
 
+
 ### 6. Configuration (Script Properties)
 
 Store the following values in `File > Project properties > Script properties`:
