@@ -133,6 +133,17 @@ function uploadGigsWithCheck() {
   const statusColData = feedbackColIndices.status !== -1 ? sheet.getRange(firstRow, feedbackColIndices.status + 1, numRows, 1).getValues() : null;
 
   for (let i = 0; i < numRows; i++) {
+    // --- Skip row if essential display data is missing ---
+    const displayName = displayData[i][colIndices.name] ? String(displayData[i][colIndices.name]).trim() : '';
+    const displayVenueId = displayData[i][colIndices.venueid] ? String(displayData[i][colIndices.venueid]).trim() : '';
+    const displayDate = displayData[i][colIndices.date] ? String(displayData[i][colIndices.date]).trim() : '';
+
+    if (!displayName && !displayVenueId && !displayDate) {
+       Logger.log(`Skipping empty row ${firstRow + i}`);
+       continue; // Skip this row entirely if key fields are blank
+    }
+    // --- End Skip Row Check ---
+
     const currentStatus = statusColData ? statusColData[i][0] : '';
     // Check if date is valid before considering upload
     const dateVal = sheetData[i][colIndices.date]; // Use mapped index
