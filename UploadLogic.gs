@@ -17,7 +17,17 @@ const CONFIG = {
 const FEEDBACK_COLS = {
   STATUS: "Upload Status",
   ID: "Upload ID",
-  ERROR: "Upload Error"
+  ERROR: "Upload Error",
+  STATUS_UPLOADED: "Uploaded", // Added for consistency
+  STATUS_FAILED: "Upload Failed" // Added for consistency
+};
+
+/**
+ * Configuration for batch uploads and error display.
+ */
+const UPLOAD_CONFIG = {
+  BATCH_SIZE: 5, // Number of rows per upload batch
+  ERROR_BACKGROUND_COLOR: '#fce8e6' // Light pink/red background for failed rows
 };
 
 /**
@@ -168,32 +178,7 @@ function uploadGigsWithCheck() {
   }
    Logger.log(`Found ${rowsToUploadIndices.length} rows to attempt uploading.`);
 
-  // --- 8. Format Data ---
-   Logger.log("Formatting data in Clipper style...");
-  let clipperContent = "";
-  try {
-    // Pass the actual headers array read from the sheet
-    clipperContent = formatDataAsClipper(rowsToUploadData, rowsToUploadDisplayData, headers);
-  } catch (e) {
-     Logger.log(`Error formatting data: ${e.message}\n${e.stack}`);
-     ui.alert("Formatting Error", `Failed to format data: ${e.message}`, ui.ButtonSet.OK);
-     // Write error back to sheet for all rows intended for upload
-     if (feedbackColIndices.error !== -1) {
-         rowsToUploadIndices.forEach(rowIndex => {
-             // Check if error column is empty before overwriting
-             const errorCell = sheet.getRange(rowIndex, feedbackColIndices.error + 1);
-             if (!errorCell.getValue()) {
-                 errorCell.setValue(`Formatting Error: ${e.message}`);
-             }
-         });
-         SpreadsheetApp.flush();
-     }
-     return;
-  }
-   // Logger.log(`Formatted Clipper Content (first 500 chars):\n${clipperContent.substring(0, 500)}...`);
-
-
-  // --- 9. Fetch CSRF Token ---
+  // --- 8. Fetch CSRF Token (Once before batching) ---
    Logger.log("Fetching CSRF token...");
   let csrfToken = null;
   try {
@@ -203,60 +188,120 @@ function uploadGigsWithCheck() {
   } catch (e) {
      Logger.log(`Error fetching CSRF token: ${e.message}\n${e.stack}`);
      ui.alert("Authentication Error", `Failed to get CSRF token: ${e.message}. Check session ID and LML URL.`, ui.ButtonSet.OK);
-     // Write error back to sheet
+     // Write error back to all potential upload rows since we can't proceed
      if (feedbackColIndices.error !== -1) {
          rowsToUploadIndices.forEach(rowIndex => {
              const errorCell = sheet.getRange(rowIndex, feedbackColIndices.error + 1);
-             if (!errorCell.getValue()) {
+             if (!errorCell.getValue()) { // Avoid overwriting duplicate messages
                 errorCell.setValue(`CSRF Token Error: ${e.message}`);
              }
          });
          SpreadsheetApp.flush();
      }
-     return;
+     return; // Stop if CSRF fails
   }
 
-  // --- 10. Submit Data ---
-   Logger.log("Submitting data to LML...");
-  const sourceLabel = `Google Sheet Upload - ${new Date().toLocaleDateString("sv")}`; // YYYY-MM-DD
-  let uploadResult = { success: false, uploadId: null, error: "Submission not attempted" };
-  try {
-    uploadResult = submitDataToLml(baseUrl, sessionId, csrfToken, sourceLabel, clipperContent);
-     Logger.log(`Upload result: ${JSON.stringify(uploadResult)}`);
-  } catch (e) {
-     Logger.log(`Error submitting data: ${e.message}\n${e.stack}`);
-     uploadResult = { success: false, uploadId: null, error: `Submission Error: ${e.message}` };
-  }
+  // --- 9. Process Uploads in Batches ---
+  const batchSize = UPLOAD_CONFIG.BATCH_SIZE;
+  const totalRowsToUpload = rowsToUploadIndices.length;
+  let successfulUploadCount = 0;
+  let failedRowCount = 0;
+  let batchesAttempted = 0;
+  let batchesFailed = 0;
+  const userEmail = Session.getActiveUser().getEmail() || 'unknown_user'; // Get user email
 
-  // --- 11. Write Final Feedback ---
-   Logger.log("Writing final feedback to sheet...");
-  const statusValue = uploadResult.success ? FEEDBACK_COLS.STATUS_UPLOADED || "Uploaded" : FEEDBACK_COLS.STATUS_FAILED || "Upload Failed";
-  const idValue = uploadResult.success ? uploadResult.uploadId : '';
-  const errorValue = uploadResult.success ? '' : uploadResult.error;
+   Logger.log(`Starting batch uploads. Batch size: ${batchSize}`);
 
-  rowsToUploadIndices.forEach(rowIndex => {
-    if (feedbackColIndices.status !== -1) sheet.getRange(rowIndex, feedbackColIndices.status + 1).setValue(statusValue);
-    if (feedbackColIndices.id !== -1) sheet.getRange(rowIndex, feedbackColIndices.id + 1).setValue(idValue);
-    if (feedbackColIndices.error !== -1) sheet.getRange(rowIndex, feedbackColIndices.error + 1).setValue(errorValue); // Overwrite previous errors if upload failed
-  });
-  SpreadsheetApp.flush();
-   Logger.log("Feedback written.");
+  for (let i = 0; i < totalRowsToUpload; i += batchSize) {
+    const batchEndIndex = Math.min(i + batchSize, totalRowsToUpload);
+    const currentBatchIndices = rowsToUploadIndices.slice(i, batchEndIndex);
+    const currentBatchData = rowsToUploadData.slice(i, batchEndIndex);
+    const currentBatchDisplayData = rowsToUploadDisplayData.slice(i, batchEndIndex);
+    batchesAttempted++;
 
-  // --- 12. Final Alert ---
-  const totalProcessed = numRows;
+     Logger.log(`Processing batch ${batchesAttempted} (Rows ${currentBatchIndices[0]} to ${currentBatchIndices[currentBatchIndices.length - 1]})`);
+
+    // --- 9a. Format Current Batch ---
+    let clipperContent = "";
+    let formattingError = null;
+    try {
+      // Pass the actual headers array read from the sheet
+      clipperContent = formatDataAsClipper(currentBatchData, currentBatchDisplayData, headers);
+    } catch (e) {
+       Logger.log(`Error formatting batch ${batchesAttempted}: ${e.message}\n${e.stack}`);
+       formattingError = `Formatting Error: ${e.message}`;
+    }
+
+    // --- 9b. Submit Current Batch (if formatting succeeded) ---
+    let uploadResult = { success: false, uploadId: null, error: formattingError || "Submission not attempted" };
+    if (!formattingError && clipperContent) { // Only submit if formatted correctly and content exists
+      const sourceLabel = `Google Sheet Upload (${userEmail}) - ${new Date().toLocaleDateString("sv")}`; // YYYY-MM-DD with email
+      try {
+        uploadResult = submitDataToLml(baseUrl, sessionId, csrfToken, sourceLabel, clipperContent);
+         Logger.log(`Batch ${batchesAttempted} upload result: ${JSON.stringify(uploadResult)}`);
+      } catch (e) {
+         Logger.log(`Error submitting batch ${batchesAttempted}: ${e.message}\n${e.stack}`);
+         uploadResult = { success: false, uploadId: null, error: `Submission Error: ${e.message}` };
+      }
+    } else if (!clipperContent && !formattingError) {
+        Logger.log(`Batch ${batchesAttempted} resulted in empty clipper content. Skipping submission.`);
+        // Treat as a failure for feedback purposes, but maybe a different error message?
+        uploadResult = { success: false, uploadId: null, error: "Formatting resulted in empty content" };
+    }
+
+
+    // --- 9c. Write Feedback for Current Batch ---
+    const statusValue = uploadResult.success ? FEEDBACK_COLS.STATUS_UPLOADED : FEEDBACK_COLS.STATUS_FAILED;
+    const idValue = uploadResult.success ? uploadResult.uploadId : '';
+    const errorValue = uploadResult.success ? '' : uploadResult.error;
+    const backgroundColor = uploadResult.success ? null : UPLOAD_CONFIG.ERROR_BACKGROUND_COLOR; // null clears background
+
+    currentBatchIndices.forEach(rowIndex => {
+      const rowRange = sheet.getRange(rowIndex, 1, 1, sheet.getLastColumn()); // Get the whole row range for background color
+      if (feedbackColIndices.status !== -1) sheet.getRange(rowIndex, feedbackColIndices.status + 1).setValue(statusValue);
+      if (feedbackColIndices.id !== -1) sheet.getRange(rowIndex, feedbackColIndices.id + 1).setValue(idValue);
+      if (feedbackColIndices.error !== -1) sheet.getRange(rowIndex, feedbackColIndices.error + 1).setValue(errorValue);
+      rowRange.setBackground(backgroundColor); // Set background for the row
+    });
+
+    if (uploadResult.success) {
+      successfulUploadCount += currentBatchIndices.length;
+    } else {
+      failedRowCount += currentBatchIndices.length;
+      batchesFailed++;
+    }
+     SpreadsheetApp.flush(); // Apply feedback after each batch
+  } // End of batch loop
+
+   Logger.log("All batches processed.");
+
+  // --- 10. Final Alert ---
+  const totalProcessed = numRows; // Total rows in the original range
   // Recalculate duplicates based on final status column content
   let duplicatesFound = 0;
   const finalStatusColData = feedbackColIndices.status !== -1 ? sheet.getRange(firstRow, feedbackColIndices.status + 1, numRows, 1).getValues() : null;
   if (finalStatusColData) {
       finalStatusColData.forEach(cell => {
-          if (String(cell[0]).toLowerCase().includes('duplicate')) {
+          // Check for the specific duplicate message, not just any status containing 'duplicate'
+          if (String(cell[0]).startsWith('Suspected Duplicate:')) {
               duplicatesFound++;
           }
       });
   }
 
-  const uploadedCount = uploadResult.success ? rowsToUploadIndices.length : 0;
-  const failedCount = !uploadResult.success ? rowsToUploadIndices.length : 0;
+  let summary = `Processed: ${totalProcessed} rows.\n`;
+  summary += `Potential Duplicates Skipped: ${duplicatesFound}\n`;
+  summary += `Rows Attempted in Upload: ${totalRowsToUpload}\n`;
+  summary += `Batches Attempted: ${batchesAttempted}\n`;
+  summary += `Batches Failed: ${batchesFailed}\n`;
+  summary += `Rows Successfully Uploaded: ${successfulUploadCount}\n`;
+  summary += `Rows Failed Upload: ${failedRowCount}`;
+  if (failedRowCount > 0) {
+      summary += ` (Marked with pink background)`;
+  }
+
+  ui.alert("Upload Summary", summary, ui.ButtonSet.OK);
+   Logger.log("Script finished.");
 
   let summary = `Processed: ${totalProcessed} rows.\n`;
   summary += `Potential Duplicates Skipped: ${duplicatesFound}\n`;
